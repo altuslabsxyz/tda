@@ -14,13 +14,20 @@ TDA provides read-only access to all three storage layers used by Tempo nodes:
 
 TDA follows Tempo's versioning scheme. Each TDA release is tagged to match the corresponding Tempo version it supports.
 
-**Current Version**: `v1.0.0-rc.3`
-- Tested and verified against Tempo `v1.0.0-rc.3`
-- Future releases will be tagged to match new Tempo versions
+**Supported Versions**:
+- `v1.0.0` - Tested and verified against Tempo `v1.0.0`
+- `v1.0.0-rc.3` - Tested and verified against Tempo `v1.0.0-rc.3`
+
+Future releases will be tagged to match new Tempo versions.
 
 To use TDA with a specific Tempo version, checkout the corresponding tag:
 
 ```bash
+# For Tempo v1.0.0
+git checkout v1.0.0
+cargo build --release
+
+# For Tempo v1.0.0-rc.3
 git checkout v1.0.0-rc.3
 cargo build --release
 ```
