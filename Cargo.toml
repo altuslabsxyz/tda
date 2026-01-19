@@ -1,0 +1,85 @@
+[package]
+name = "tda"
+version = "1.0.0-rc.3"
+edition = "2024"
+rust-version = "1.91.0"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "tda"
+path = "src/main.rs"
+
+[dependencies]
+# Reth database (for MDBX reading)
+reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+
+# Reth dependencies for static file parsing
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-nippy-jar = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553", default-features = false }
+
+# Tempo primitives (for TempoHeader)
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.0.0-rc.3", default-features = false, features = ["reth", "serde", "reth-codec"] }
+
+# Alloy primitives (for basic types)
+alloy-primitives = { version = "1.5.0", default-features = false }
+alloy-rlp = "0.3.12"
+
+# Commonware (for parsing consensus/DKG data)
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
+commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
+
+# CLI and utilities
+clap = { version = "4.5.45", features = ["derive"] }
+clap_complete = "4.5"
+eyre = "0.6.12"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.142"
+hex = "0.4"
+
+# Async runtime (minimal)
+tokio = { version = "1.45.1", features = ["fs", "rt"] }
+
+# File system utilities
+walkdir = "2.5"
+
+# Compression (ruzstd for finalized blocks decompression)
+ruzstd = "0.7"
+
+# Bytes utilities (for codec)
+bytes = "1.9"
+
+# Build dependencies (for reth build scripts compatibility)
+[build-dependencies]
+vergen = "9"
+vergen-git2 = "1"
+
+[lints.clippy]
+dbg-macro = "warn"
+manual-string-new = "warn"
+uninlined-format-args = "warn"
+use-self = "warn"
+redundant-clone = "warn"
+default-constructed-unit-structs = "allow"
+
+[lints.rust]
+rust-2018-idioms = "warn"
+unreachable-pub = "warn"
+unused-must-use = "warn"
+redundant-lifetimes = "warn"
+unnameable-types = "warn"
+
+[lints.rustdoc]
+all = "warn"
+
+[features]
+default = []
+
+# Exclude unnecessary Tempo workspace members to avoid build errors
+[workspace]
+members = []
+exclude = []
