@@ -1,6 +1,6 @@
 [package]
 name = "tda"
-version = "1.0.0-rc.3"
+version = "1.0.0-rc.4"
 edition = "2024"
 rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
@@ -19,6 +19,7 @@ reth-db-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f177
 reth-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-nippy-jar = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-storage-errors = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553", default-features = false }
 
 # Tempo primitives (for TempoHeader)
@@ -27,6 +28,7 @@ tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.0.0-rc
 # Alloy primitives (for basic types)
 alloy-primitives = { version = "1.5.0", default-features = false }
 alloy-rlp = "0.3.12"
+alloy-consensus = "1.4.3"
 
 # Commonware (for parsing consensus/DKG data)
 commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }

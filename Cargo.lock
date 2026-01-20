@@ -6084,8 +6084,9 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "tda"
-version = "1.0.0-rc.3"
+version = "1.0.0-rc.4"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-rlp",
  "bytes",
@@ -6101,6 +6102,7 @@ dependencies = [
  "reth-nippy-jar",
  "reth-primitives",
  "reth-provider",
+ "reth-storage-api",
  "reth-storage-errors",
  "ruzstd",
  "serde",

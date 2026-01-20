@@ -145,6 +145,15 @@ enum StaticFileAction {
 
     /// Dump all static file data
     DumpAll,
+
+    /// Dump all headers to JSON
+    DumpHeaders,
+
+    /// Dump all transactions to JSON
+    DumpTransactions,
+
+    /// Dump all receipts to JSON
+    DumpReceipts,
 }
 
 #[tokio::main]

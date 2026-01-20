@@ -60,9 +60,85 @@ pub fn handle_command(
                 return Ok(());
             }
 
-            println!("=== Dumping all static file data ===");
-            println!("Note: This is not yet fully implemented.");
-            println!("Would iterate through all segments and export to JSON files.");
+            println!("=== Dumping all static file data ===\n");
+
+            // Dump headers
+            println!("Parsing headers...");
+            let (headers, header_files) = analyzer.dump_all_headers()?;
+            if !headers.is_empty() {
+                let headers_path = output.join("static_file_headers.json");
+                let json = serde_json::to_string_pretty(&headers)?;
+                std::fs::write(&headers_path, json)?;
+                println!("✓ Dumped {} headers to: {}", headers.len(), headers_path.display());
+                println!("  Source files: {:?}", header_files);
+            } else {
+                println!("✗ No headers found");
+            }
+
+            // Dump transactions
+            println!("\nParsing transactions...");
+            let (transactions, tx_files) = analyzer.dump_all_transactions()?;
+            if !transactions.is_empty() {
+                let txs_path = output.join("static_file_transactions.json");
+                let json = serde_json::to_string_pretty(&transactions)?;
+                std::fs::write(&txs_path, json)?;
+                println!("✓ Dumped {} transactions to: {}", transactions.len(), txs_path.display());
+                println!("  Source files: {:?}", tx_files);
+            } else {
+                println!("✗ No transactions found");
+            }
+
+            // Dump receipts
+            println!("\nParsing receipts...");
+            let (receipts, receipt_files) = analyzer.dump_all_receipts()?;
+            if !receipts.is_empty() {
+                let receipts_path = output.join("static_file_receipts.json");
+                let json = serde_json::to_string_pretty(&receipts)?;
+                std::fs::write(&receipts_path, json)?;
+                println!("✓ Dumped {} receipts to: {}", receipts.len(), receipts_path.display());
+                println!("  Source files: {:?}", receipt_files);
+            } else {
+                println!("✗ No receipts found");
+            }
+        }
+        Some(StaticFileAction::DumpHeaders) => {
+            println!("=== Dumping Headers ===\n");
+            let (headers, source_files) = analyzer.dump_all_headers()?;
+            if !headers.is_empty() {
+                let headers_path = output.join("static_file_headers.json");
+                let json = serde_json::to_string_pretty(&headers)?;
+                std::fs::write(&headers_path, json)?;
+                println!("✓ Dumped {} headers to: {}", headers.len(), headers_path.display());
+                println!("  Source files: {:?}", source_files);
+            } else {
+                println!("✗ No headers found");
+            }
+        }
+        Some(StaticFileAction::DumpTransactions) => {
+            println!("=== Dumping Transactions ===\n");
+            let (transactions, source_files) = analyzer.dump_all_transactions()?;
+            if !transactions.is_empty() {
+                let txs_path = output.join("static_file_transactions.json");
+                let json = serde_json::to_string_pretty(&transactions)?;
+                std::fs::write(&txs_path, json)?;
+                println!("✓ Dumped {} transactions to: {}", transactions.len(), txs_path.display());
+                println!("  Source files: {:?}", source_files);
+            } else {
+                println!("✗ No transactions found");
+            }
+        }
+        Some(StaticFileAction::DumpReceipts) => {
+            println!("=== Dumping Receipts ===\n");
+            let (receipts, source_files) = analyzer.dump_all_receipts()?;
+            if !receipts.is_empty() {
+                let receipts_path = output.join("static_file_receipts.json");
+                let json = serde_json::to_string_pretty(&receipts)?;
+                std::fs::write(&receipts_path, json)?;
+                println!("✓ Dumped {} receipts to: {}", receipts.len(), receipts_path.display());
+                println!("  Source files: {:?}", source_files);
+            } else {
+                println!("✗ No receipts found");
+            }
         }
     }
 
