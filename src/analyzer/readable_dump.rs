@@ -1106,6 +1106,7 @@ fn dump_static_files_readable(datadir: &Path, output: &Path) -> Result<()> {
 
     match StaticFileAnalyzer::new(datadir) {
         Ok(analyzer) => {
+            // Dump headers
             match analyzer.dump_all_headers() {
                 Ok((headers, source_files)) => {
                     if !headers.is_empty() {
@@ -1116,6 +1117,52 @@ fn dump_static_files_readable(datadir: &Path, output: &Path) -> Result<()> {
                         let filename_abs = filename.canonicalize().unwrap_or(filename.clone());
 
                         println!("parsed {} headers", headers.len());
+                        println!("- out: {}", abbreviate_path(&filename_abs, &datadir_abs, &output_abs));
+                        for src_file in source_files {
+                            let src_file_abs = src_file.canonicalize().unwrap_or(src_file.clone());
+                            println!("- src: {}", abbreviate_path(&src_file_abs, &datadir_abs, &output_abs));
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // Silent failure
+                }
+            }
+
+            // Dump transactions
+            match analyzer.dump_all_transactions() {
+                Ok((transactions, source_files)) => {
+                    if !transactions.is_empty() {
+                        let filename = output.join("readable_static_file_transactions.json");
+                        let json = serde_json::to_string_pretty(&transactions)?;
+                        fs::write(&filename, json)?;
+
+                        let filename_abs = filename.canonicalize().unwrap_or(filename.clone());
+
+                        println!("parsed {} transactions", transactions.len());
+                        println!("- out: {}", abbreviate_path(&filename_abs, &datadir_abs, &output_abs));
+                        for src_file in source_files {
+                            let src_file_abs = src_file.canonicalize().unwrap_or(src_file.clone());
+                            println!("- src: {}", abbreviate_path(&src_file_abs, &datadir_abs, &output_abs));
+                        }
+                    }
+                }
+                Err(_e) => {
+                    // Silent failure
+                }
+            }
+
+            // Dump receipts
+            match analyzer.dump_all_receipts() {
+                Ok((receipts, source_files)) => {
+                    if !receipts.is_empty() {
+                        let filename = output.join("readable_static_file_receipts.json");
+                        let json = serde_json::to_string_pretty(&receipts)?;
+                        fs::write(&filename, json)?;
+
+                        let filename_abs = filename.canonicalize().unwrap_or(filename.clone());
+
+                        println!("parsed {} receipts", receipts.len());
                         println!("- out: {}", abbreviate_path(&filename_abs, &datadir_abs, &output_abs));
                         for src_file in source_files {
                             let src_file_abs = src_file.canonicalize().unwrap_or(src_file.clone());

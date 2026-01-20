@@ -1,13 +1,15 @@
 use crate::types::{KeyInfo, Summary};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::fs;
-use alloy_primitives::{Address, Bloom, Bytes, B256, B64, U256};
+use alloy_primitives::TxKind;
 use alloy_rlp::Decodable;
+use alloy_consensus::transaction::SignerRecoverable;
 use serde::{Deserialize, Serialize};
-use tempo_primitives::{TempoHeader, TempoPrimitives};
+use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope};
 use reth_nippy_jar::{NippyJar, NippyJarCursor};
-use reth_provider::{HeaderProvider, providers::StaticFileProvider};
+use reth_provider::{HeaderProvider, providers::StaticFileProvider, BlockNumReader};
+use reth_storage_api::{TransactionsProvider, ReceiptProvider};
+use reth_primitives::{TransactionSigned, Receipt, Log, TxType};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReadableStaticHeader {
@@ -43,6 +45,51 @@ pub struct ReadableStaticHeader {
     pub parent_beacon_block_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requests_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadableTransaction {
+    pub tx_index: u64,
+    pub tx_hash: String,
+    pub tx_type: String,
+    pub from: String,
+    pub to: Option<String>,
+    pub value: String,
+    pub gas_limit: u64,
+    pub gas_price: Option<String>,
+    pub max_fee_per_gas: Option<String>,
+    pub max_priority_fee_per_gas: Option<String>,
+    pub nonce: u64,
+    pub input: String,
+    pub chain_id: Option<u64>,
+    pub signature_v: String,
+    pub signature_r: String,
+    pub signature_s: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_list: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_fee_per_blob_gas: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blob_versioned_hashes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadableLog {
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReadableReceipt {
+    pub tx_index: u64,
+    pub tx_type: String,
+    pub success: bool,
+    pub cumulative_gas_used: u64,
+    pub logs: Vec<ReadableLog>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_address: Option<String>,
+    pub logs_bloom: String,
 }
 
 pub struct StaticFileAnalyzer {
@@ -266,6 +313,369 @@ impl StaticFileAnalyzer {
             excess_blob_gas: header.inner.excess_blob_gas,
             parent_beacon_block_root: header.inner.parent_beacon_block_root.map(|h| format!("0x{}", hex::encode(h.as_slice()))),
             requests_hash: header.inner.requests_hash.map(|h| format!("0x{}", hex::encode(h.as_slice()))),
+        }
+    }
+
+    pub fn dump_all_transactions(&self) -> Result<(Vec<ReadableTransaction>, Vec<PathBuf>)> {
+        let mut transactions = Vec::new();
+        let mut source_files = Vec::new();
+
+        println!("  Parsing transactions from static files...");
+
+        // First, get all headers to know which blocks to query
+        let (headers, _) = self.dump_all_headers()?;
+
+        if headers.is_empty() {
+            println!("  ✗ No headers found, cannot determine block range");
+            return Ok((transactions, source_files));
+        }
+
+        println!("  Found {} blocks, extracting transactions...", headers.len());
+
+        // Try to use StaticFileProvider to read transactions by block
+        match self.parse_transactions_with_provider(&headers) {
+            Ok((txs, files)) => {
+                transactions = txs;
+                source_files = files;
+            }
+            Err(e) => {
+                println!("  ⚠ StaticFileProvider approach failed: {:?}", e);
+                println!("  Note: Transaction parsing from NippyJar columnar format requires");
+                println!("        proper column reconstruction, which is complex to implement manually.");
+                println!("        Returning empty transaction list.");
+            }
+        }
+
+        Ok((transactions, source_files))
+    }
+
+    fn parse_transactions_with_provider(&self, headers: &[ReadableStaticHeader]) -> Result<(Vec<ReadableTransaction>, Vec<PathBuf>)> {
+        let mut transactions = Vec::new();
+        let mut source_files = Vec::new();
+
+        // Initialize StaticFileProvider
+        let provider = StaticFileProvider::<TempoPrimitives>::read_only(&self.static_files_path, true)
+            .wrap_err("Failed to create StaticFileProvider")?;
+
+        println!("  Querying transactions sequentially...");
+
+        // Since we don't have easy access to block->tx mapping, we'll try sequential tx IDs
+        // Static files contain sequential transaction numbers starting from 0
+        let mut tx_num = 0u64;
+        let mut consecutive_failures = 0;
+        let max_consecutive_failures = 100; // Stop after 100 consecutive misses
+
+        loop {
+            match provider.transaction_by_id(tx_num) {
+                Ok(Some(tx_envelope)) => {
+                    // Extract actual fields from TempoTxEnvelope
+                    let readable_tx = Self::transaction_to_readable(tx_num, &tx_envelope);
+                    transactions.push(readable_tx);
+                    consecutive_failures = 0; // Reset failure counter
+                    tx_num += 1;
+
+                    if tx_num % 10000 == 0 {
+                        print!("\r  Progress: {} transactions...", tx_num);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                }
+                Ok(None) => {
+                    consecutive_failures += 1;
+                    tx_num += 1;
+
+                    if consecutive_failures >= max_consecutive_failures {
+                        println!("  Reached end of transaction data");
+                        break;
+                    }
+                }
+                Err(_e) => {
+                    consecutive_failures += 1;
+                    tx_num += 1;
+
+                    if consecutive_failures >= max_consecutive_failures {
+                        println!("  Reached end of transaction data (errors)");
+                        break;
+                    }
+                }
+            }
+        }
+
+        if transactions.len() > 0 {
+            print!("\r");  // Clear progress line
+        }
+        println!("  ✓ Extracted {} transactions", transactions.len());
+
+        // Find which files were used
+        let entries = std::fs::read_dir(&self.static_files_path)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let file_name = path.file_name().unwrap().to_str().unwrap();
+                if file_name.contains("transactions") && !file_name.ends_with(".off") && !file_name.ends_with(".conf") {
+                    source_files.push(path);
+                }
+            }
+        }
+
+        Ok((transactions, source_files))
+    }
+
+    fn transaction_to_readable(tx_index: u64, tx_envelope: &TempoTxEnvelope) -> ReadableTransaction {
+        use alloy_consensus::transaction::{TxHashRef, Transaction};
+
+        // Calculate transaction hash
+        let tx_hash = tx_envelope.tx_hash();
+        let tx_hash_str = format!("0x{}", hex::encode(tx_hash.as_slice()));
+
+        // Get transaction type
+        let tx_type = format!("{:?}", tx_envelope.tx_type());
+
+        // Recover sender address
+        let from = match tx_envelope.recover_signer() {
+            Ok(address) => format!("0x{}", hex::encode(address.as_slice())),
+            Err(_) => "0x0000000000000000000000000000000000000000".to_string(),
+        };
+
+        // Extract common fields using Transaction trait
+        let to = tx_envelope.to().map(|addr| format!("0x{}", hex::encode(addr.as_slice())));
+
+        let value = tx_envelope.value().to_string();
+        let gas_limit = tx_envelope.gas_limit();
+        let nonce = tx_envelope.nonce();
+        let input = format!("0x{}", hex::encode(tx_envelope.input()));
+        let chain_id = tx_envelope.chain_id();
+
+        // Extract fee fields (different based on tx type)
+        let gas_price = tx_envelope.gas_price();
+        let max_fee_per_gas = tx_envelope.max_fee_per_gas();
+        let max_priority_fee_per_gas = tx_envelope.max_priority_fee_per_gas();
+
+        // Extract signature by matching on variants
+        // Note: AA transactions use TempoSignature which has a different structure
+        use alloy_consensus::Signed;
+        let (signature_v, signature_r, signature_s) = match tx_envelope {
+            TempoTxEnvelope::Legacy(signed) => {
+                let sig = signed.signature();
+                (sig.v().to_string(),
+                 format!("0x{}", hex::encode(sig.r().as_le_bytes())),
+                 format!("0x{}", hex::encode(sig.s().as_le_bytes())))
+            }
+            TempoTxEnvelope::Eip2930(signed) => {
+                let sig = signed.signature();
+                (sig.v().to_string(),
+                 format!("0x{}", hex::encode(sig.r().as_le_bytes())),
+                 format!("0x{}", hex::encode(sig.s().as_le_bytes())))
+            }
+            TempoTxEnvelope::Eip1559(signed) => {
+                let sig = signed.signature();
+                (sig.v().to_string(),
+                 format!("0x{}", hex::encode(sig.r().as_le_bytes())),
+                 format!("0x{}", hex::encode(sig.s().as_le_bytes())))
+            }
+            TempoTxEnvelope::Eip7702(signed) => {
+                let sig = signed.signature();
+                (sig.v().to_string(),
+                 format!("0x{}", hex::encode(sig.r().as_le_bytes())),
+                 format!("0x{}", hex::encode(sig.s().as_le_bytes())))
+            }
+            TempoTxEnvelope::AA(signed) => {
+                // TempoSignature doesn't have v/r/s format, encode as bytes
+                let sig_bytes = signed.signature().to_bytes();
+                ("0".to_string(),
+                 format!("0x{}", hex::encode(&sig_bytes)),
+                 "0x0".to_string())
+            }
+        };
+
+        // Extract access list if present
+        let access_list = tx_envelope.access_list().map(|list| {
+            list.0.iter().map(|item| {
+                format!("0x{}", hex::encode(item.address.as_slice()))
+            }).collect()
+        });
+
+        // Extract blob fields if present
+        let max_fee_per_blob_gas = tx_envelope.max_fee_per_blob_gas().map(|v| v.to_string());
+        let blob_versioned_hashes = tx_envelope.blob_versioned_hashes().map(|hashes| {
+            hashes.iter().map(|hash| format!("0x{}", hex::encode(hash.as_slice()))).collect()
+        });
+
+        ReadableTransaction {
+            tx_index,
+            tx_hash: tx_hash_str,
+            tx_type,
+            from,
+            to,
+            value,
+            gas_limit,
+            gas_price: gas_price.map(|v| v.to_string()),
+            max_fee_per_gas: if max_fee_per_gas > 0 { Some(max_fee_per_gas.to_string()) } else { None },
+            max_priority_fee_per_gas: max_priority_fee_per_gas.map(|v| v.to_string()),
+            nonce,
+            input,
+            chain_id,
+            signature_v,
+            signature_r,
+            signature_s,
+            access_list,
+            max_fee_per_blob_gas,
+            blob_versioned_hashes,
+        }
+    }
+
+    pub fn dump_all_receipts(&self) -> Result<(Vec<ReadableReceipt>, Vec<PathBuf>)> {
+        let mut receipts = Vec::new();
+        let mut source_files = Vec::new();
+
+        println!("  Parsing receipts from static files...");
+
+        // First, get all headers to know which blocks to query
+        let (headers, _) = self.dump_all_headers()?;
+
+        if headers.is_empty() {
+            println!("  ✗ No headers found, cannot determine block range");
+            return Ok((receipts, source_files));
+        }
+
+        println!("  Found {} blocks, extracting receipts...", headers.len());
+
+        // Try to use StaticFileProvider to read receipts by block
+        match self.parse_receipts_with_provider(&headers) {
+            Ok((rcts, files)) => {
+                receipts = rcts;
+                source_files = files;
+            }
+            Err(e) => {
+                println!("  ⚠ StaticFileProvider approach failed: {:?}", e);
+                println!("  Note: Receipt parsing from NippyJar columnar format requires");
+                println!("        proper column reconstruction, which is complex to implement manually.");
+                println!("        Returning empty receipt list.");
+            }
+        }
+
+        Ok((receipts, source_files))
+    }
+
+    fn parse_receipts_with_provider(&self, headers: &[ReadableStaticHeader]) -> Result<(Vec<ReadableReceipt>, Vec<PathBuf>)> {
+        let mut receipts = Vec::new();
+        let mut source_files = Vec::new();
+
+        // Initialize StaticFileProvider
+        let provider = StaticFileProvider::<TempoPrimitives>::read_only(&self.static_files_path, true)
+            .wrap_err("Failed to create StaticFileProvider")?;
+
+        println!("  Querying receipts sequentially...");
+
+        // Since we don't have easy access to block->tx mapping, we'll try sequential tx IDs
+        // Receipts are indexed by transaction number (same as transactions)
+        let mut tx_num = 0u64;
+        let mut consecutive_failures = 0;
+        let max_consecutive_failures = 100; // Stop after 100 consecutive misses
+
+        loop {
+            match provider.receipt(tx_num) {
+                Ok(Some(receipt)) => {
+                    // Create a minimal receipt with available data
+                    let readable_receipt = ReadableReceipt {
+                        tx_index: tx_num,
+                        tx_type: format!("{:?}", receipt.tx_type),
+                        success: receipt.success,
+                        cumulative_gas_used: receipt.cumulative_gas_used,
+                        logs: receipt.logs.iter().map(|log| ReadableLog {
+                            address: format!("0x{}", hex::encode(log.address.as_slice())),
+                            topics: log.topics().iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect(),
+                            data: format!("0x{}", hex::encode(&log.data.data)),
+                        }).collect(),
+                        contract_address: None,
+                        logs_bloom: "0x".to_string(), // Would need to calculate from logs
+                    };
+                    receipts.push(readable_receipt);
+                    consecutive_failures = 0; // Reset failure counter
+                    tx_num += 1;
+
+                    if tx_num % 10000 == 0 {
+                        print!("\r  Progress: {} receipts...", tx_num);
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                }
+                Ok(None) => {
+                    consecutive_failures += 1;
+                    tx_num += 1;
+
+                    if consecutive_failures >= max_consecutive_failures {
+                        println!("  Reached end of receipt data");
+                        break;
+                    }
+                }
+                Err(_e) => {
+                    consecutive_failures += 1;
+                    tx_num += 1;
+
+                    if consecutive_failures >= max_consecutive_failures {
+                        println!("  Reached end of receipt data (errors)");
+                        break;
+                    }
+                }
+            }
+        }
+
+        if receipts.len() > 0 {
+            print!("\r");  // Clear progress line
+        }
+        println!("  ✓ Extracted {} receipts", receipts.len());
+
+        // Find which files were used
+        let entries = std::fs::read_dir(&self.static_files_path)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() {
+                let file_name = path.file_name().unwrap().to_str().unwrap();
+                if file_name.contains("receipts") && !file_name.ends_with(".off") && !file_name.ends_with(".conf") {
+                    source_files.push(path);
+                }
+            }
+        }
+
+        Ok((receipts, source_files))
+    }
+
+    fn receipt_to_readable(tx_index: u64, receipt: &Receipt) -> ReadableReceipt {
+        let tx_type = match receipt.tx_type {
+            TxType::Legacy => "Legacy",
+            TxType::Eip2930 => "EIP-2930",
+            TxType::Eip1559 => "EIP-1559",
+            TxType::Eip4844 => "EIP-4844",
+            TxType::Eip7702 => "EIP-7702",
+            _ => "Unknown",
+        };
+
+        // Calculate logs bloom from logs
+        use alloy_primitives::Bloom;
+        let bloom = receipt.logs.iter().fold(Bloom::ZERO, |mut bloom, log| {
+            bloom.accrue_log(log);
+            bloom
+        });
+
+        ReadableReceipt {
+            tx_index,
+            tx_type: tx_type.to_string(),
+            success: receipt.success,
+            cumulative_gas_used: receipt.cumulative_gas_used,
+            logs: receipt.logs.iter().map(Self::log_to_readable).collect(),
+            contract_address: None, // Receipt doesn't have this field directly in reth
+            logs_bloom: format!("0x{}", hex::encode(bloom.as_slice())),
+        }
+    }
+
+    fn log_to_readable(log: &Log) -> ReadableLog {
+        ReadableLog {
+            address: format!("0x{}", hex::encode(log.address.as_slice())),
+            topics: log.topics().iter().map(|t| format!("0x{}", hex::encode(t.as_slice()))).collect(),
+            data: format!("0x{}", hex::encode(&log.data.data)),
         }
     }
 
