@@ -28,7 +28,7 @@ pub struct ReadableBlock {
     pub shared_gas_limit: u64,
     pub timestamp_millis_part: u64,
     pub header: ReadableHeader,
-    pub transactions: Vec<ReadableTransaction>,
+    pub transactions: Vec<String>,  // Raw hex-encoded transactions
     pub ommers: Vec<ReadableHeader>,
     pub raw_size_bytes: usize,
 }
@@ -64,11 +64,7 @@ pub struct ReadableHeader {
     pub requests_hash: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ReadableTransaction {
-    pub tx_type: String,
-    pub raw_data: String, // For now, keep as hex
-}
+// Transactions are now just raw hex strings (matching reth's storage format)
 
 pub fn dump_readable_files(datadir: &Path, output: &Path) -> Result<()> {
     // Dump MDBX database (execution state)
@@ -462,13 +458,22 @@ fn parse_rlp_block(data: &[u8]) -> Result<(ReadableBlock, usize)> {
                 let mut tx_count = 0;
 
                 while tx_cursor.len() > 0 && tx_count < 10000 {
+                    let cursor_len_before = tx_cursor.len();
                     match parse_single_transaction(&mut tx_cursor) {
                         Ok(tx) => {
                             transactions.push(tx);
                             tx_count += 1;
+                            if tx_count <= 5 {
+                                println!("        TX {}: {} bytes consumed, {} bytes remaining",
+                                    tx_count, cursor_len_before - tx_cursor.len(), tx_cursor.len());
+                            }
                         }
                         Err(e) => {
-                            println!("        Warning: Failed to parse transaction {}: {}", tx_count, e);
+                            println!("        Warning: Failed to parse transaction {} at cursor position (remaining {} bytes): {}",
+                                tx_count, tx_cursor.len(), e);
+                            if tx_cursor.len() > 0 && tx_count == 0 {
+                                println!("        First few bytes: {:02x?}", &tx_cursor[..tx_cursor.len().min(20)]);
+                            }
                             break;
                         }
                     }
@@ -506,7 +511,7 @@ fn parse_rlp_block(data: &[u8]) -> Result<(ReadableBlock, usize)> {
     Ok((block, total_consumed))
 }
 
-fn parse_single_transaction(cursor: &mut &[u8]) -> Result<ReadableTransaction> {
+fn parse_single_transaction(cursor: &mut &[u8]) -> Result<String> {
     if cursor.is_empty() {
         eyre::bail!("Empty transaction data");
     }
@@ -516,23 +521,14 @@ fn parse_single_transaction(cursor: &mut &[u8]) -> Result<ReadableTransaction> {
 
     // Decode the transaction envelope
     // Transactions can be:
-    // - Legacy: RLP list (0xc0-0xff)
-    // - Typed: Single byte type prefix (0x00-0x7f) followed by RLP payload
+    // - Typed transaction (EIP-2718): 0x00-0x7f type byte + RLP payload
+    // - RLP string wrapper: 0x80-0xbf (Tempo wraps transactions in RLP strings)
+    // - Legacy transaction: 0xc0-0xff RLP list
 
-    let tx_type;
     let total_consumed;
 
     if cursor[0] <= 0x7f {
         // Typed transaction (EIP-2718)
-        tx_type = match cursor[0] {
-            0x00 => "Legacy (typed)",
-            0x01 => "EIP-2930",
-            0x02 => "EIP-1559",
-            0x03 => "EIP-4844",
-            0x04 => "EIP-7702",
-            other => return Err(eyre::eyre!("Unknown transaction type: 0x{:02x}", other)),
-        }.to_string();
-
         // Skip type byte
         *cursor = &cursor[1..];
 
@@ -550,10 +546,27 @@ fn parse_single_transaction(cursor: &mut &[u8]) -> Result<ReadableTransaction> {
 
         // Skip the transaction payload
         *cursor = &cursor[payload_size..];
-    } else {
-        // Legacy transaction (RLP list)
-        tx_type = "Legacy".to_string();
+    } else if cursor[0] >= 0x80 && cursor[0] < 0xc0 {
+        // RLP string wrapper (0x80-0xbf)
+        // This is a transaction wrapped in an RLP string
+        let header = alloy_rlp::Header::decode(&mut &cursor[..])
+            .context("Failed to decode RLP string wrapper")?;
 
+        if header.list {
+            return Err(eyre::eyre!("Expected RLP string for wrapped transaction, got list"));
+        }
+
+        let payload_size = header.payload_length + header.length();
+        if payload_size > cursor.len() {
+            return Err(eyre::eyre!("Transaction data truncated"));
+        }
+
+        total_consumed = payload_size;
+
+        // Skip the transaction payload
+        *cursor = &cursor[payload_size..];
+    } else {
+        // Legacy transaction (RLP list, 0xc0-0xff)
         let header = alloy_rlp::Header::decode(&mut &cursor[..])
             .context("Failed to decode legacy transaction RLP header")?;
 
@@ -576,10 +589,7 @@ fn parse_single_transaction(cursor: &mut &[u8]) -> Result<ReadableTransaction> {
     let raw_bytes = &original_cursor[..total_consumed];
     let raw_data = format!("0x{}", hex::encode(raw_bytes));
 
-    Ok(ReadableTransaction {
-        tx_type,
-        raw_data,
-    })
+    Ok(raw_data)
 }
 
 fn parse_ethereum_header(cursor: &mut &[u8]) -> Result<ReadableHeader> {
@@ -1617,21 +1627,39 @@ fn parse_single_rlp_block(data: &[u8]) -> Result<ReadableBlock> {
     if cursor.len() > 0 {
         if let Ok(tx_list_header) = alloy_rlp::Header::decode(&mut cursor) {
             if tx_list_header.list {
+                eprintln!("        Block #{}: Found {} bytes of transaction data", header.number, tx_list_header.payload_length);
                 // Parse transactions
                 let tx_list_end = cursor.len().min(tx_list_header.payload_length);
                 let mut tx_cursor = &cursor[..tx_list_end];
                 let mut tx_count = 0;
 
                 while tx_cursor.len() > 0 && tx_count < 10000 {
+                    let cursor_len_before = tx_cursor.len();
                     match parse_single_transaction(&mut tx_cursor) {
                         Ok(tx) => {
                             transactions.push(tx);
                             tx_count += 1;
+                            if header.number <= 5 && tx_count <= 3 {
+                                eprintln!("        Block #{} TX {}: {} bytes consumed, {} bytes remaining",
+                                    header.number, tx_count, cursor_len_before - tx_cursor.len(), tx_cursor.len());
+                            }
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            if header.number <= 5 || header.number == 305 || tx_count == 0 {
+                                eprintln!("        Block #{}: Failed to parse TX {} (remaining {} bytes): {}",
+                                    header.number, tx_count + 1, tx_cursor.len(), e);
+                                if tx_cursor.len() > 0 {
+                                    eprintln!("        First few bytes: {:02x?}", &tx_cursor[..tx_cursor.len().min(20)]);
+                                }
+                            }
                             break;
                         }
                     }
+                }
+
+                if header.number <= 5 || (header.number % 100 == 0) {
+                    eprintln!("        Block #{}: Parsed {} transactions (payload had {} bytes)",
+                        header.number, tx_count, tx_list_header.payload_length);
                 }
 
                 cursor = &cursor[tx_list_header.payload_length..];
