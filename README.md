@@ -15,8 +15,8 @@ TDA provides read-only access to all three storage layers used by Tempo nodes:
 TDA follows Tempo's versioning scheme. Each TDA release is tagged to match the corresponding Tempo version it supports.
 
 **Supported Versions**:
+- `v1.0.1` - Tested and verified against Tempo `v1.0.1`
 - `v1.0.0` - Tested and verified against Tempo `v1.0.0`
-- `v1.0.0-rc.3` - Tested and verified against Tempo `v1.0.0-rc.3`
 
 Future releases will be tagged to match new Tempo versions.
 
