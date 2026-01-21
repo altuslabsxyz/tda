@@ -99,9 +99,15 @@ fn dump_consensus_readable(datadir: &Path, output: &Path) -> Result<()> {
     let finalized_ordinal_path = consensus_path.join("engine-finalized_blocks-ordinal/0000000000000000");
     let finalized_value_path = consensus_path.join("engine-finalized_blocks-freezer-value/0000000000000000");
 
+    eprintln!("DEBUG: Checking finalized blocks...");
+    eprintln!("DEBUG: Ordinal path exists: {}", finalized_ordinal_path.exists());
+    eprintln!("DEBUG: Value path exists: {}", finalized_value_path.exists());
+
     if finalized_ordinal_path.exists() && finalized_value_path.exists() {
+        eprintln!("DEBUG: Calling parse_freezer_blocks_with_ordinal...");
         match parse_freezer_blocks_with_ordinal(&finalized_ordinal_path, &finalized_value_path) {
             Ok(blocks) => {
+                eprintln!("DEBUG: Successfully parsed {} finalized blocks", blocks.len());
                 let out_path = output.join("readable_finalized_blocks.json");
                 let json = serde_json::to_string_pretty(&blocks)?;
                 fs::write(&out_path, json)?;
@@ -116,10 +122,12 @@ fn dump_consensus_readable(datadir: &Path, output: &Path) -> Result<()> {
                 println!("- src: {}", abbreviate_path(&finalized_value_abs, &datadir_abs, &output_abs));
             }
             Err(e) => {
+                eprintln!("DEBUG: Finalized blocks parsing error: {:?}", e);
                 println!("✗ Finalized blocks failed: {:?}", e);
             }
         }
     } else if finalized_value_path.exists() {
+        eprintln!("DEBUG: Only value file exists, trying parse_cwic_blocks...");
         match parse_cwic_blocks(&finalized_value_path) {
             Ok(blocks) => {
                 let out_path = output.join("readable_finalized_blocks.json");
@@ -133,10 +141,12 @@ fn dump_consensus_readable(datadir: &Path, output: &Path) -> Result<()> {
                 println!("- out: {}", abbreviate_path(&out_path_abs, &datadir_abs, &output_abs));
                 println!("- src: {}", abbreviate_path(&finalized_value_abs, &datadir_abs, &output_abs));
             }
-            Err(_e) => {
-                // Silent failure
+            Err(e) => {
+                eprintln!("DEBUG: parse_cwic_blocks error: {:?}", e);
             }
         }
+    } else {
+        eprintln!("DEBUG: Skipping finalized blocks - files don't exist");
     }
 
     // Parse notarized blocks (cache format)
@@ -440,12 +450,31 @@ fn parse_rlp_block(data: &[u8]) -> Result<(ReadableBlock, usize)> {
     println!("        Parsed Ethereum header for block #{}", header.number);
 
     // Field 5: transactions list
-    let transactions = Vec::new();
+    let mut transactions = Vec::new();
     if cursor.len() > 0 {
         if let Ok(tx_list_header) = alloy_rlp::Header::decode(&mut cursor) {
             if tx_list_header.list {
                 println!("        Found {} bytes of transaction data", tx_list_header.payload_length);
-                // Skip transaction parsing for now
+
+                // Parse transactions
+                let tx_list_end = cursor.len().min(tx_list_header.payload_length);
+                let mut tx_cursor = &cursor[..tx_list_end];
+                let mut tx_count = 0;
+
+                while tx_cursor.len() > 0 && tx_count < 10000 {
+                    match parse_single_transaction(&mut tx_cursor) {
+                        Ok(tx) => {
+                            transactions.push(tx);
+                            tx_count += 1;
+                        }
+                        Err(e) => {
+                            println!("        Warning: Failed to parse transaction {}: {}", tx_count, e);
+                            break;
+                        }
+                    }
+                }
+
+                println!("        Parsed {} transactions", tx_count);
                 cursor = &cursor[tx_list_header.payload_length..];
             }
         }
@@ -475,6 +504,82 @@ fn parse_rlp_block(data: &[u8]) -> Result<(ReadableBlock, usize)> {
     println!("      Successfully parsed Tempo block ({} bytes)", total_consumed);
 
     Ok((block, total_consumed))
+}
+
+fn parse_single_transaction(cursor: &mut &[u8]) -> Result<ReadableTransaction> {
+    if cursor.is_empty() {
+        eyre::bail!("Empty transaction data");
+    }
+
+    // Save the original cursor to capture raw data
+    let original_cursor = *cursor;
+
+    // Decode the transaction envelope
+    // Transactions can be:
+    // - Legacy: RLP list (0xc0-0xff)
+    // - Typed: Single byte type prefix (0x00-0x7f) followed by RLP payload
+
+    let tx_type;
+    let total_consumed;
+
+    if cursor[0] <= 0x7f {
+        // Typed transaction (EIP-2718)
+        tx_type = match cursor[0] {
+            0x00 => "Legacy (typed)",
+            0x01 => "EIP-2930",
+            0x02 => "EIP-1559",
+            0x03 => "EIP-4844",
+            0x04 => "EIP-7702",
+            other => return Err(eyre::eyre!("Unknown transaction type: 0x{:02x}", other)),
+        }.to_string();
+
+        // Skip type byte
+        *cursor = &cursor[1..];
+
+        // Decode the RLP payload
+        let header = alloy_rlp::Header::decode(&mut &cursor[..])
+            .context("Failed to decode transaction RLP header")?;
+
+        let payload_size = header.payload_length + header.length();
+        if payload_size > cursor.len() {
+            return Err(eyre::eyre!("Transaction data truncated"));
+        }
+
+        // Total consumed: type byte (1) + RLP envelope
+        total_consumed = 1 + payload_size;
+
+        // Skip the transaction payload
+        *cursor = &cursor[payload_size..];
+    } else {
+        // Legacy transaction (RLP list)
+        tx_type = "Legacy".to_string();
+
+        let header = alloy_rlp::Header::decode(&mut &cursor[..])
+            .context("Failed to decode legacy transaction RLP header")?;
+
+        if !header.list {
+            return Err(eyre::eyre!("Expected RLP list for legacy transaction"));
+        }
+
+        let payload_size = header.payload_length + header.length();
+        if payload_size > cursor.len() {
+            return Err(eyre::eyre!("Transaction data truncated"));
+        }
+
+        total_consumed = payload_size;
+
+        // Skip the transaction payload
+        *cursor = &cursor[payload_size..];
+    }
+
+    // Extract raw data from original cursor
+    let raw_bytes = &original_cursor[..total_consumed];
+    let raw_data = format!("0x{}", hex::encode(raw_bytes));
+
+    Ok(ReadableTransaction {
+        tx_type,
+        raw_data,
+    })
 }
 
 fn parse_ethereum_header(cursor: &mut &[u8]) -> Result<ReadableHeader> {
@@ -608,20 +713,33 @@ fn parse_finalization_certificates(ordinal_path: &Path, value_path: &Path) -> Re
         eyre::bail!("Invalid ordinal file");
     }
 
-    let mut offset = 48;  // Skip CWIC header
+    let mut offset = 8;  // Skip CWIC header (8 bytes, not 48!)
     let mut entries = Vec::new();
 
-    while offset + 144 <= ordinal_data.len() {
-        let entry_data = &ordinal_data[offset..offset + 144];
-        if entry_data[0..16].iter().all(|&b| b == 0) {
-            break;
+    // Each ordinal entry is a Record<Cursor> structure:
+    // - Cursor (20 bytes):
+    //   - section: u64 (8 bytes, big-endian)
+    //   - offset: u64 (8 bytes, big-endian)
+    //   - size: u32 (4 bytes, big-endian)
+    // - CRC: u32 (4 bytes, big-endian)
+    // Total: 24 bytes per record
+    const RECORD_SIZE: usize = 24;
+
+    while offset + RECORD_SIZE <= ordinal_data.len() {
+        let record_data = &ordinal_data[offset..offset + RECORD_SIZE];
+
+        // Parse Cursor fields (all big-endian)
+        let _section = u64::from_be_bytes(record_data[0..8].try_into().unwrap());
+        let cursor_offset = u64::from_be_bytes(record_data[8..16].try_into().unwrap());
+        let size = u32::from_be_bytes(record_data[16..20].try_into().unwrap());
+        let _crc = u32::from_be_bytes(record_data[20..24].try_into().unwrap());
+
+        // Only add entries with non-zero size (skip empty/padding records)
+        if size > 0 {
+            entries.push((cursor_offset, size as u64));
         }
 
-        let value_offset = u16::from_be_bytes([entry_data[22], entry_data[23]]) as u64;
-        let value_size = u16::from_be_bytes([entry_data[26], entry_data[27]]) as u64;
-
-        entries.push((value_offset, value_size));
-        offset += 144;
+        offset += RECORD_SIZE;
     }
 
     // Read and decompress value file
@@ -633,11 +751,18 @@ fn parse_finalization_certificates(ordinal_path: &Path, value_path: &Path) -> Re
     let compressed_data = &value_data[8..];
     let mut certificates = Vec::new();
 
+    eprintln!("DEBUG: Found {} entries in ordinal file", entries.len());
+    eprintln!("DEBUG: Compressed data size: {} bytes", compressed_data.len());
+
+    let mut skipped_oob = 0;
+    let mut skipped_magic = 0;
+
     for (idx, (cert_offset, cert_size)) in entries.iter().enumerate() {
         let start = *cert_offset as usize;
         let size = *cert_size as usize;
 
         if start + size > compressed_data.len() {
+            skipped_oob += 1;
             continue;
         }
 
@@ -645,6 +770,11 @@ fn parse_finalization_certificates(ordinal_path: &Path, value_path: &Path) -> Re
 
         // Check zstd magic
         if compressed_frame.len() < 4 || compressed_frame[0..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+            skipped_magic += 1;
+            if skipped_magic <= 5 {
+                eprintln!("DEBUG: Entry {} at offset {} size {} has magic: {:02x?}",
+                    idx, cert_offset, cert_size, &compressed_frame[..4.min(compressed_frame.len())]);
+            }
             continue;
         }
 
@@ -658,6 +788,9 @@ fn parse_finalization_certificates(ordinal_path: &Path, value_path: &Path) -> Re
             }
         }
     }
+
+    eprintln!("DEBUG: Skipped {} entries (out of bounds), {} entries (bad magic)", skipped_oob, skipped_magic);
+    eprintln!("DEBUG: Successfully parsed {} certificates", certificates.len());
 
     Ok(certificates)
 }
@@ -1205,45 +1338,43 @@ fn parse_freezer_blocks_with_ordinal(ordinal_path: &Path, value_path: &Path) -> 
         eyre::bail!("Ordinal file: invalid magic");
     }
 
-    // Skip 48-byte header
-    let mut offset = 48;
+    // Skip 8-byte CWIC header (not 48!)
+    let mut offset = 8;
     let mut entries = Vec::new();
 
-    // Read all ordinal entries (144 bytes each = 9 rows of 16 bytes)
-    while offset + 144 <= ordinal_data.len() {
-        let entry_data = &ordinal_data[offset..offset + 144];
+    // Each ordinal entry is a Record<Cursor> structure (24 bytes total):
+    // - Cursor (20 bytes):
+    //   - section: u64 (8 bytes, big-endian)
+    //   - offset: u64 (8 bytes, big-endian)
+    //   - size: u32 (4 bytes, big-endian)
+    // - CRC: u32 (4 bytes, big-endian)
+    const RECORD_SIZE: usize = 24;
 
-        // Check if first row is all zeros (end of entries)
-        if entry_data[0..16].iter().all(|&b| b == 0) {
-            break;
+    while offset + RECORD_SIZE <= ordinal_data.len() {
+        let record_data = &ordinal_data[offset..offset + RECORD_SIZE];
+
+        // Parse Cursor fields (all big-endian)
+        let _section = u64::from_be_bytes(record_data[0..8].try_into().unwrap());
+        let cursor_offset = u64::from_be_bytes(record_data[8..16].try_into().unwrap());
+        let size = u32::from_be_bytes(record_data[16..20].try_into().unwrap());
+        let _crc = u32::from_be_bytes(record_data[20..24].try_into().unwrap());
+
+        // Skip empty/padding records (size = 0)
+        if size == 0 {
+            offset += RECORD_SIZE;
+            continue;
         }
-
-        // Parse ordinal entry structure (9 rows of 16 bytes)
-        // Row 0 (bytes 0-15): metadata
-        // Row 1 (bytes 16-31): contains offset and size
-        //   - Bytes 22-23 (row1 offset 6-7): offset in value file (big-endian u16)
-        //   - Bytes 26-27 (row1 offset 10-11): size (big-endian u16)
-
-        // Extract offset from row 1, bytes 6-7 (entry_data offset 22-23)
-        let value_offset = u16::from_be_bytes([
-            entry_data[22], entry_data[23]
-        ]) as u64;
-
-        // Extract size from row 1, bytes 10-11 (entry_data offset 26-27)
-        let value_size = u16::from_be_bytes([
-            entry_data[26], entry_data[27]
-        ]) as u64;
 
         // We don't have digest in this ordinal format, use dummy
         let _digest = [0u8; 32];
 
         entries.push(OrdinalEntry {
             _digest,
-            value_offset,
-            value_size,
+            value_offset: cursor_offset,
+            value_size: size as u64,
         });
 
-        offset += 144;
+        offset += RECORD_SIZE;
     }
 
     // Read value file
@@ -1265,12 +1396,23 @@ fn parse_freezer_blocks_with_ordinal(ordinal_path: &Path, value_path: &Path) -> 
     // Parse blocks using ordinal entries
     let mut blocks = Vec::new();
 
+    eprintln!("DEBUG: Found {} entries in ordinal", entries.len());
+    let mut skipped_oob = 0;
+    let mut skipped_magic = 0;
+    let mut skipped_decompress = 0;
+    let mut skipped_parse = 0;
+
     use std::io::Read;
-    for entry in entries.iter() {
+    for (idx, entry) in entries.iter().enumerate() {
         let start_offset = entry.value_offset as usize;
         let frame_size = entry.value_size as usize;
 
         if start_offset + frame_size > compressed_data.len() {
+            skipped_oob += 1;
+            if skipped_oob <= 5 {
+                eprintln!("DEBUG: Entry {} OOB - offset: {}, size: {}, data len: {}",
+                    idx, start_offset, frame_size, compressed_data.len());
+            }
             continue;
         }
 
@@ -1279,20 +1421,56 @@ fn parse_freezer_blocks_with_ordinal(ordinal_path: &Path, value_path: &Path) -> 
 
         // Check for zstd magic
         if compressed_frame.len() < 4 || compressed_frame[0..4] != [0x28, 0xB5, 0x2F, 0xFD] {
+            skipped_magic += 1;
+            if skipped_magic <= 5 {
+                eprintln!("DEBUG: Entry {} bad magic - offset: {}, size: {}, magic: {:02x?}",
+                    idx, start_offset, frame_size,
+                    if compressed_frame.len() >= 4 { &compressed_frame[..4] } else { compressed_frame });
+            }
             continue;
         }
 
         // Decompress this specific frame
-        if let Ok(mut decoder) = ruzstd::StreamingDecoder::new(compressed_frame) {
-            let mut decompressed = Vec::new();
-            if decoder.read_to_end(&mut decompressed).is_ok() {
-                // Parse the decompressed block
-                if let Ok(block) = parse_single_rlp_block(&decompressed) {
-                    blocks.push(block);
+        match ruzstd::StreamingDecoder::new(compressed_frame) {
+            Ok(mut decoder) => {
+                let mut decompressed = Vec::new();
+                match decoder.read_to_end(&mut decompressed) {
+                    Ok(_) => {
+                        // Parse the decompressed block
+                        match parse_single_rlp_block(&decompressed) {
+                            Ok(block) => {
+                                blocks.push(block);
+                            }
+                            Err(e) => {
+                                skipped_parse += 1;
+                                if skipped_parse <= 5 {
+                                    eprintln!("DEBUG: Entry {} parse fail - offset: {}, size: {}, error: {}",
+                                        idx, start_offset, frame_size, e);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        skipped_decompress += 1;
+                        if skipped_decompress <= 5 {
+                            eprintln!("DEBUG: Entry {} decompress fail - offset: {}, size: {}, error: {}",
+                                idx, start_offset, frame_size, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                skipped_decompress += 1;
+                if skipped_decompress <= 5 {
+                    eprintln!("DEBUG: Entry {} decoder init fail - offset: {}, size: {}, error: {}",
+                        idx, start_offset, frame_size, e);
                 }
             }
         }
     }
+
+    eprintln!("DEBUG: Parsing complete - Success: {}, Skipped - OOB: {}, Bad magic: {}, Decompress fail: {}, Parse fail: {}",
+        blocks.len(), skipped_oob, skipped_magic, skipped_decompress, skipped_parse);
 
     Ok(blocks)
 }
@@ -1435,12 +1613,28 @@ fn parse_single_rlp_block(data: &[u8]) -> Result<ReadableBlock> {
     let header = parse_ethereum_header(&mut cursor).context("Failed to parse inner Ethereum header")?;
 
     // Field 5: transactions list
-    let transactions = Vec::new();
+    let mut transactions = Vec::new();
     if cursor.len() > 0 {
         if let Ok(tx_list_header) = alloy_rlp::Header::decode(&mut cursor) {
             if tx_list_header.list {
-                // Skip transaction parsing for now
-                let _ = &cursor[tx_list_header.payload_length..];
+                // Parse transactions
+                let tx_list_end = cursor.len().min(tx_list_header.payload_length);
+                let mut tx_cursor = &cursor[..tx_list_end];
+                let mut tx_count = 0;
+
+                while tx_cursor.len() > 0 && tx_count < 10000 {
+                    match parse_single_transaction(&mut tx_cursor) {
+                        Ok(tx) => {
+                            transactions.push(tx);
+                            tx_count += 1;
+                        }
+                        Err(_) => {
+                            break;
+                        }
+                    }
+                }
+
+                cursor = &cursor[tx_list_header.payload_length..];
             }
         }
     }
