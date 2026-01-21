@@ -2,7 +2,7 @@ use crate::types::{KeyInfo, Summary};
 use eyre::{Context, Result};
 use std::path::{Path, PathBuf};
 use alloy_primitives::TxKind;
-use alloy_rlp::Decodable;
+use alloy_rlp::{Decodable, Encodable};
 use alloy_consensus::transaction::SignerRecoverable;
 use serde::{Deserialize, Serialize};
 use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope};
@@ -349,7 +349,7 @@ impl StaticFileAnalyzer {
         Ok((transactions, source_files))
     }
 
-    fn parse_transactions_with_provider(&self, headers: &[ReadableStaticHeader]) -> Result<(Vec<ReadableTransaction>, Vec<PathBuf>)> {
+    fn parse_transactions_with_provider(&self, _headers: &[ReadableStaticHeader]) -> Result<(Vec<ReadableTransaction>, Vec<PathBuf>)> {
         let mut transactions = Vec::new();
         let mut source_files = Vec::new();
 
